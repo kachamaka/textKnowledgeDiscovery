@@ -9,3 +9,6 @@
 Subtask 2a - Given a meme, identify which of the 22 persuasion techniques (https://propaganda.math.unipd.it/semeval2024task4/definitions22.html), organized in a hierarchy, are used both in the textual and in the visual content of the meme (multimodal task). 
 If the ancestor node of a technique is selected, only partial reward will be given. 
 This is a hierarchical multilabel classification problem. You can find info on the hierarchy here (https://propaganda.math.unipd.it/semeval2024task4/data/hierarchy_evaluation.html).
+
+
+The idea of the project would be to compare 2 different appropaches in solving this problem.
