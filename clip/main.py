@@ -28,21 +28,28 @@ CLIPPROCESSOR = CLIPProcessor.from_pretrained(MODEL)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMAGE_SIZE = 224
 
+mean = (0.48145466, 0.4578275, 0.40821073)
+std = (0.26862954, 0.26130258, 0.27577711)
+
 TRAIN_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandAugment(num_ops=3, magnitude=4),  # You can tweak num_ops and magnitude
+    transforms.RandAugment(num_ops=2, magnitude=2),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(15),
-    # transforms.ToTensor(),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.RandomGrayscale(p=0.1),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+
+    transforms.Normalize(mean=mean, std=std),
 ])
 
 VAL_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    # transforms.ToTensor(),
+    transforms.Normalize(mean=mean, std=std),
 ])
 
 class PropagandaDataset(Dataset):
-    def __init__(self, data_split, labels, transform=None):
+    def __init__(self, data_split, labels, transform=None, use_captions=False):
         self.data_split = data_split
         self.transform = transform
         self.samples = []
@@ -50,21 +57,28 @@ class PropagandaDataset(Dataset):
 
         df = pd.read_json(labels)
 
-        for _, row in df.iterrows():
+        if use_captions:
+            self.captions = pd.read_json(f"./labels/{data_split}_captions.json").to_dict()['text']
+
+            if len(self.captions) != len(df):
+                raise ValueError(f"Number of captions ({len(self.captions)}) does not match number of samples ({len(df)}) in {data_split} set.")
+
+        for idx, row in df.iterrows():
             img_name = row['image']
             image_path = os.path.join("data", self.data_split, img_name)
             labels = row['labels']
             img_text = row['text']
-            
-            if not os.path.exists(image_path):
-                print(f"Image not found: {image_path}")
-                continue
             
             for label in set(labels):
                 self.sample_counter[label] += 1
                 
             labels_one_hot = utils.labels_to_vector(labels)
             self.samples.append((image_path, img_text, labels_one_hot))
+
+            if use_captions:
+                caption = self.captions[idx]
+                self.samples.append((image_path, caption, labels_one_hot))
+
             # return # One sample for testing
 
     def __len__(self):
@@ -139,9 +153,23 @@ def collate_fn(batch):
     
     labels = torch.stack(labels)
     return inputs['pixel_values'], inputs['input_ids'], inputs['attention_mask'], labels
-    
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+        return F_loss.mean()
+
+
 def train_model(dataloader_train, dataloader_validation, model, optimizer, num_epochs, threshold=0.5, save_path=None):
-    criterion = nn.BCEWithLogitsLoss()
+    # criterion = nn.BCEWithLogitsLoss()
+    criterion = FocalLoss(alpha=0.25, gamma=2)
 
     train_losses = []
     train_macro_f1_scores = []
@@ -242,7 +270,7 @@ def main():
 
     print(f"Using device: {DEVICE}")
 
-    train_dataset = PropagandaDataset(data_split="train", labels="./labels/train.json", transform=TRAIN_TRANSFORMATIONS)
+    train_dataset = PropagandaDataset(data_split="train", labels="./labels/train.json", transform=TRAIN_TRANSFORMATIONS, use_captions=True)
     val_dataset = PropagandaDataset(data_split="val", labels="./labels/val.json", transform=VAL_TRANSFORMATIONS)
 
     train_dataset.print_class_distribution()

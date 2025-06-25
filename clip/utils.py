@@ -146,3 +146,42 @@ def plot_training_metrics(train_history):
 
     plt.tight_layout()
     plt.show()
+
+def extract_captions():
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+    from PIL import Image
+    import json
+    import pandas as pd
+    import os
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    model.eval()
+
+    image = Image.open("./data/train/prop_meme_24718.png").convert('RGB')
+
+    # Preprocess
+    inputs = processor(images=image, return_tensors="pt")
+
+    train_captions = []
+    train_df = pd.read_json("./labels/train.json")
+    for _, row in train_df.iterrows():
+        img_name = row['image']
+        print(len(train_captions), "/", len(train_df))
+        print(f"Generating caption for image: {img_name}")
+        image_path = os.path.join("data", "train", img_name)
+        image = Image.open(image_path).convert('RGB')
+
+        # Generate caption
+        with torch.no_grad():
+            output = model.generate(**inputs)
+
+        train_caption = processor.decode(output[0], skip_special_tokens=True)
+        train_captions.append({
+            "id": row['id'],
+            "text": train_caption,
+            "image": img_name,
+            "labels": row['labels'],
+        })
+
+    with open("./labels/train_captions.json", "w") as f:
+        json.dump(train_captions, f, indent=4)
