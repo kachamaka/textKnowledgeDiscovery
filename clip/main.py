@@ -18,7 +18,7 @@ from collections import Counter
 import timm
 from transformers import CLIPProcessor, CLIPModel
 from sklearn.metrics import f1_score
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 
 # MODEL = "openai/clip-vit-base-patch32"
 MODEL = "openai/clip-vit-base-patch16"
@@ -28,32 +28,27 @@ CLIPPROCESSOR = CLIPProcessor.from_pretrained(MODEL)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMAGE_SIZE = 224
 
-mean = (0.48145466, 0.4578275, 0.40821073)
-std = (0.26862954, 0.26130258, 0.27577711)
-
 TRAIN_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandAugment(num_ops=2, magnitude=2),
+    transforms.RandAugment(num_ops=4, magnitude=3),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(15),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.RandomGrayscale(p=0.1),
     transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
-
-    transforms.Normalize(mean=mean, std=std),
 ])
 
 VAL_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.Normalize(mean=mean, std=std),
 ])
 
 class PropagandaDataset(Dataset):
-    def __init__(self, data_split, labels, transform=None, use_captions=False):
+    def __init__(self, data_split, labels, transform=None, use_captions=False, text_augmenter=None):
         self.data_split = data_split
         self.transform = transform
         self.samples = []
         self.sample_counter = Counter()     
+        self.text_augmenter = text_augmenter if data_split == "train" else None
 
         df = pd.read_json(labels)
 
@@ -66,8 +61,8 @@ class PropagandaDataset(Dataset):
         for idx, row in df.iterrows():
             img_name = row['image']
             image_path = os.path.join("data", self.data_split, img_name)
-            labels = row['labels']
-            img_text = row['text']
+            labels = [x.lower() for x in row['labels']] # Normalize labels
+            img_text = row['text'].lower()
             
             for label in set(labels):
                 self.sample_counter[label] += 1
@@ -76,7 +71,7 @@ class PropagandaDataset(Dataset):
             self.samples.append((image_path, img_text, labels_one_hot))
 
             if use_captions:
-                caption = self.captions[idx]
+                caption = self.captions[idx].lower()
                 self.samples.append((image_path, caption, labels_one_hot))
 
             # return # One sample for testing
@@ -89,8 +84,24 @@ class PropagandaDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
+
+        # if self.text_augmenter:
+        #     img_text = self.text_augmenter(img_text)
+
         return image, img_text, labels
+    
+    def calculate_class_weights(self):
+        class_counts = torch.zeros(len(self.sample_counter))
+        total_samples = len(self)
         
+        for i, (label, count) in enumerate(self.sample_counter.most_common()):
+            idx = utils.PERSUASION_TECHNIQUES.index(label)
+            class_counts[idx] = count
+        
+        # Inverse frequency weighting
+        class_weights = total_samples / (len(utils.PERSUASION_TECHNIQUES) * class_counts + 1e-6)
+        return class_weights
+
     def print_class_distribution(self):
         total_classes = len(self.sample_counter)
         total_samples = len(self.samples)
@@ -104,36 +115,52 @@ class PropagandaDataset(Dataset):
             print(f"{label:50s}: {count} samples")
     
 class PersuasionTechniquesModel(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, dropout_rate=0.5):
         super(PersuasionTechniquesModel, self).__init__()
 
         self.model = CLIPModel.from_pretrained(MODEL)
+        self.dropout_rate = dropout_rate
 
         for param in self.model.parameters():
             param.requires_grad = False
 
         for name, param in self.model.named_parameters():
             if any(layer_name in name for layer_name in [
+                "visual.transformer.resblocks.7",
+                "text_model.encoder.layers.7",
+                "visual.transformer.resblocks.8",
+                "text_model.encoder.layers.8",
+                "visual.transformer.resblocks.9",
+                "text_model.encoder.layers.9",
                 "visual.transformer.resblocks.10",
                 "text_model.encoder.layers.10",
                 "visual.transformer.resblocks.11",
-                "text_model.encoder.layers.11"
+                "text_model.encoder.layers.11",
             ]):
                 param.requires_grad = True
 
         hidden_dim = self.model.config.projection_dim
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.LayerNorm(hidden_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, num_classes)
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate * 0.7),
+            
+            nn.Linear(hidden_dim // 2, num_classes),
         )
 
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.classifier:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_normal_(module.weight)
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, pixel_values, input_ids, attention_mask):
         outputs = self.model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
@@ -141,6 +168,7 @@ class PersuasionTechniquesModel(nn.Module):
         text_embeds = outputs.text_embeds    # (batch_size, projection_dim)
 
         combined_embeds = torch.cat([image_embeds, text_embeds], dim=1)
+
         logits = self.classifier(combined_embeds)
 
         return logits
@@ -154,27 +182,17 @@ def collate_fn(batch):
     labels = torch.stack(labels)
     return inputs['pixel_values'], inputs['input_ids'], inputs['attention_mask'], labels
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, inputs, targets):
-        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-        return F_loss.mean()
-
-
 def train_model(dataloader_train, dataloader_validation, model, optimizer, num_epochs, threshold=0.5, save_path=None):
-    # criterion = nn.BCEWithLogitsLoss()
-    criterion = FocalLoss(alpha=0.25, gamma=2)
+    
+    # class_weights = dataloader_train.dataset.calculate_class_weights().to(DEVICE)
+    criterion = nn.BCEWithLogitsLoss()
 
     train_losses = []
     train_macro_f1_scores = []
+    train_micro_f1_scores = []
     val_losses = []
     val_macro_f1_scores = []
+    val_micro_f1_scores = []
 
     for epoch in range(num_epochs):
         # Training phase
@@ -215,8 +233,9 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
         avg_train_loss = train_loss / len(dataloader_train)
         train_losses.append(avg_train_loss)
 
-        train_macro_f1_score = utils.calculate_macro_f1(all_train_targets, all_train_predictions)
+        train_macro_f1_score, train_micro_f1_score = utils.f1_scores(all_train_targets, all_train_predictions)
         train_macro_f1_scores.append(train_macro_f1_score)
+        train_micro_f1_scores.append(train_micro_f1_score)
 
         # Validation phase
         model.eval()
@@ -248,30 +267,43 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
         avg_val_loss = val_loss / len(dataloader_validation)
         val_losses.append(avg_val_loss)
 
-        val_macro_f1_score = utils.calculate_macro_f1(all_val_targets, all_val_predictions)
+        val_macro_f1_score, val_micro_f1_score = utils.f1_scores(all_val_targets, all_val_predictions)
         val_macro_f1_scores.append(val_macro_f1_score)
+        val_micro_f1_scores.append(val_micro_f1_score)
 
-        train_bar.write(f"Train Loss: {avg_train_loss:.4f}, Macro F1: {train_macro_f1_score:.4f}")
-        val_bar.write(f"Val Loss: {avg_val_loss:.4f}, Macro F1: {val_macro_f1_score:.4f}")
+        train_bar.write(f"Train Loss: {avg_train_loss:.4f}, Macro F1: {train_macro_f1_score:.4f}, Micro F1: {train_micro_f1_score:.4f}")
+        val_bar.write(f"Val Loss: {avg_val_loss:.4f}, Macro F1: {val_macro_f1_score:.4f}, Micro F1: {val_micro_f1_score:.4f}")
 
     return {
         'train_losses': train_losses,
         'val_losses': val_losses,
         'train_macro_f1_scores': train_macro_f1_scores,
+        'train_micro_f1_scores': train_micro_f1_scores,
         'val_macro_f1_scores': val_macro_f1_scores,
+        'val_micro_f1_scores': val_micro_f1_scores,
     }
 
 def main():
-    batch_size = 16
-    learning_rate = 1e-5
+    batch_size = 8
+    learning_rate = 1e-3
     weight_decay = 1e-6
     threshold = 0.5
     num_epochs = 20
 
     print(f"Using device: {DEVICE}")
 
-    train_dataset = PropagandaDataset(data_split="train", labels="./labels/train.json", transform=TRAIN_TRANSFORMATIONS, use_captions=True)
-    val_dataset = PropagandaDataset(data_split="val", labels="./labels/val.json", transform=VAL_TRANSFORMATIONS)
+    train_dataset = PropagandaDataset(
+        data_split="train", 
+        labels="./labels/train.json", 
+        transform=TRAIN_TRANSFORMATIONS, 
+        use_captions=True, 
+        text_augmenter=utils.TextAugmenter(prob=0.3)
+    )
+    
+    val_dataset = PropagandaDataset(
+        data_split="val", 
+        labels="./labels/val.json", transform=VAL_TRANSFORMATIONS
+)
 
     train_dataset.print_class_distribution()
     val_dataset.print_class_distribution()

@@ -3,6 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
 
+import nltk
+import random
+from nltk.corpus import wordnet
+
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+
 PERSUASION_TECHNIQUES = ['presenting irrelevant data (red herring)', "misrepresentation of someone's position (straw man)", 'whataboutism', 
                          'causal oversimplification', 'obfuscation, intentional vagueness, confusion', 'appeal to authority', 
                          'black-and-white fallacy/dictatorship', 'name calling/labeling', 'loaded language', 'exaggeration/minimisation', 
@@ -113,8 +120,10 @@ def hierarchical_f1_score(pred_labels, gold_labels, verbose=False):
             print("=" * 60)
     return f1
 
-def calculate_macro_f1(targets, predictions):
-    return f1_score(targets, predictions, average='macro')
+def f1_scores(targets, predictions):
+    macro_f1 = f1_score(targets, predictions, average='macro')
+    micro_f1 = f1_score(targets, predictions, average='micro')
+    return macro_f1, micro_f1
     all_f1_scores = []
     for pred, target in zip(predictions, targets):
         f1 = hierarchical_f1_score(pred, target)
@@ -123,26 +132,38 @@ def calculate_macro_f1(targets, predictions):
     macro_f1 = np.mean(all_f1_scores)
     return macro_f1
 
-
 def plot_training_metrics(train_history):
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
+    plt.figure(figsize=(10, 12))
+
+    # Plot 1: Loss
+    plt.subplot(3, 1, 1)
     plt.plot(train_history['train_losses'], label='Train Loss', color='blue')
     plt.plot(train_history['val_losses'], label='Validation Loss', color='red')
     plt.title('Loss over Epochs')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.legend()    
-
+    plt.legend()
     plt.grid()
-    plt.subplot(1, 2, 2)
+
+    # Plot 2: Macro F1
+    plt.subplot(3, 1, 2)
     plt.plot(train_history['train_macro_f1_scores'], label='Train Macro F1', color='blue')
     plt.plot(train_history['val_macro_f1_scores'], label='Validation Macro F1', color='red')
     plt.title('Macro F1 Score over Epochs')
     plt.xlabel('Epochs')
     plt.ylabel('Macro F1 Score')
     plt.legend()
-    plt.grid()  
+    plt.grid()
+
+    # Plot 3: Micro F1
+    plt.subplot(3, 1, 3)
+    plt.plot(train_history['train_micro_f1_scores'], label='Train Micro F1', color='blue')
+    plt.plot(train_history['val_micro_f1_scores'], label='Validation Micro F1', color='red')
+    plt.title('Micro F1 Score over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Micro F1 Score')
+    plt.legend()
+    plt.grid()
 
     plt.tight_layout()
     plt.show()
@@ -185,3 +206,50 @@ def extract_captions():
 
     with open("./labels/train_captions.json", "w") as f:
         json.dump(train_captions, f, indent=4)
+
+
+
+class TextAugmenter:
+    def __init__(self, prob=0.3):
+        self.prob = prob
+
+    def synonym_replacement(self, words):
+        new_words = words.copy()
+        for i, word in enumerate(words):
+            if random.random() < self.prob:
+                synonyms = wordnet.synsets(word)
+                if synonyms:
+                    lemmas = synonyms[0].lemmas()
+                    if lemmas:
+                        synonym = lemmas[0].name().replace("_", " ")
+                        new_words[i] = synonym
+        return new_words
+
+    def random_deletion(self, words):
+        if len(words) == 1:
+            return words
+        return [w for w in words if random.random() > self.prob]
+
+    def random_swap(self, words):
+        new_words = words.copy()
+        if len(words) < 2:
+            return new_words
+        for _ in range(1):
+            idx1, idx2 = random.sample(range(len(words)), 2)
+            new_words[idx1], new_words[idx2] = new_words[idx2], new_words[idx1]
+        return new_words
+
+    def random_case(self, words):
+        return [w.upper() if random.random() < 0.1 else w for w in words]
+
+    def __call__(self, text):
+        words = text.strip().split()
+        if random.random() < self.prob:
+            words = self.synonym_replacement(words)
+        if random.random() < self.prob:
+            words = self.random_deletion(words)
+        if random.random() < self.prob:
+            words = self.random_swap(words)
+        if random.random() < self.prob:
+            words = self.random_case(words)
+        return " ".join(words)
