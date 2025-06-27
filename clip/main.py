@@ -285,7 +285,7 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
 
 def main():
     batch_size = 8
-    learning_rate = 1e-3
+    learning_rate = 1e-4
     weight_decay = 1e-6
     threshold = 0.5
     num_epochs = 20

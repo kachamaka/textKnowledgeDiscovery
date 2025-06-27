@@ -124,6 +124,7 @@ def f1_scores(targets, predictions):
     macro_f1 = f1_score(targets, predictions, average='macro')
     micro_f1 = f1_score(targets, predictions, average='micro')
     return macro_f1, micro_f1
+    # TODO: experiment with different scores
     all_f1_scores = []
     for pred, target in zip(predictions, targets):
         f1 = hierarchical_f1_score(pred, target)
@@ -174,37 +175,38 @@ def extract_captions():
     import json
     import pandas as pd
     import os
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    # caption_model = "microsoft/Florence-2-large-ft"
+    caption_model = "Salesforce/blip-image-captioning-base"
+    processor = BlipProcessor.from_pretrained(caption_model)
+    model = BlipForConditionalGeneration.from_pretrained(caption_model)
     model.eval()
 
-    image = Image.open("./data/train/prop_meme_24718.png").convert('RGB')
-
     # Preprocess
-    inputs = processor(images=image, return_tensors="pt")
 
     train_captions = []
     train_df = pd.read_json("./labels/train.json")
     for _, row in train_df.iterrows():
         img_name = row['image']
-        print(len(train_captions), "/", len(train_df))
-        print(f"Generating caption for image: {img_name}")
         image_path = os.path.join("data", "train", img_name)
         image = Image.open(image_path).convert('RGB')
 
         # Generate caption
+        inputs = processor(images=image, return_tensors="pt")
         with torch.no_grad():
             output = model.generate(**inputs)
 
         train_caption = processor.decode(output[0], skip_special_tokens=True)
+        print(len(train_captions), "/", len(train_df))
+        print(f"Generating caption for image: {img_name}")
+        # print(f"Generated caption: {train_caption}")
         train_captions.append({
             "id": row['id'],
             "text": train_caption,
             "image": img_name,
             "labels": row['labels'],
         })
-
-    with open("./labels/train_captions.json", "w") as f:
+    
+    with open("./labels/train_captions1.json", "w") as f:
         json.dump(train_captions, f, indent=4)
 
 
