@@ -30,25 +30,26 @@ IMAGE_SIZE = 224
 
 TRAIN_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandAugment(num_ops=4, magnitude=3),
+    transforms.RandAugment(num_ops=3, magnitude=3),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
     transforms.RandomGrayscale(p=0.1),
-    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+    transforms.ToTensor(),
+    # transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
 ])
 
 VAL_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    # transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
 ])
 
 class PropagandaDataset(Dataset):
-    def __init__(self, data_split, labels, transform=None, use_captions=False, text_augmenter=None):
+    def __init__(self, data_split, labels, transform=None, use_captions=False):
         self.data_split = data_split
         self.transform = transform
         self.samples = []
         self.sample_counter = Counter()     
-        self.text_augmenter = text_augmenter if data_split == "train" else None
 
         df = pd.read_json(labels)
 
@@ -58,6 +59,7 @@ class PropagandaDataset(Dataset):
             if len(self.captions) != len(df):
                 raise ValueError(f"Number of captions ({len(self.captions)}) does not match number of samples ({len(df)}) in {data_split} set.")
 
+        count = 500
         for idx, row in df.iterrows():
             img_name = row['image']
             image_path = os.path.join("data", self.data_split, img_name)
@@ -73,8 +75,10 @@ class PropagandaDataset(Dataset):
             if use_captions:
                 caption = self.captions[idx].lower()
                 self.samples.append((image_path, caption, labels_one_hot))
-
+                
             # return # One sample for testing
+            # if idx >= count:
+            #     return
 
     def __len__(self):
         return len(self.samples)
@@ -84,9 +88,6 @@ class PropagandaDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
-
-        # if self.text_augmenter:
-        #     img_text = self.text_augmenter(img_text)
 
         return image, img_text, labels
     
@@ -113,9 +114,9 @@ class PropagandaDataset(Dataset):
         print("\nSample count per class:")
         for label, count in self.sample_counter.most_common(5):
             print(f"{label:50s}: {count} samples")
-    
+   
 class PersuasionTechniquesModel(nn.Module):
-    def __init__(self, num_classes, dropout_rate=0.5):
+    def __init__(self, num_classes, dropout_rate=0.4):
         super(PersuasionTechniquesModel, self).__init__()
 
         self.model = CLIPModel.from_pretrained(MODEL)
@@ -126,12 +127,6 @@ class PersuasionTechniquesModel(nn.Module):
 
         for name, param in self.model.named_parameters():
             if any(layer_name in name for layer_name in [
-                "visual.transformer.resblocks.7",
-                "text_model.encoder.layers.7",
-                "visual.transformer.resblocks.8",
-                "text_model.encoder.layers.8",
-                "visual.transformer.resblocks.9",
-                "text_model.encoder.layers.9",
                 "visual.transformer.resblocks.10",
                 "text_model.encoder.layers.10",
                 "visual.transformer.resblocks.11",
@@ -142,14 +137,14 @@ class PersuasionTechniquesModel(nn.Module):
         hidden_dim = self.model.config.projection_dim
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate * 0.7),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
             
             nn.Linear(hidden_dim // 2, num_classes),
         )
@@ -168,7 +163,6 @@ class PersuasionTechniquesModel(nn.Module):
         text_embeds = outputs.text_embeds    # (batch_size, projection_dim)
 
         combined_embeds = torch.cat([image_embeds, text_embeds], dim=1)
-
         logits = self.classifier(combined_embeds)
 
         return logits
@@ -177,15 +171,25 @@ def collate_fn(batch):
     images, texts, labels = zip(*batch)
     # Process images and texts with CLIP processor
     # inputs = CLIPPROCESSOR(text=list(texts), images=list(images), return_tensors="pt", padding=True, truncation=True)
-    inputs = CLIPPROCESSOR(text=list(texts), images=list(images), return_tensors="pt", padding=True, truncation=True, do_resize=False)
-    
+    # inputs = CLIPPROCESSOR(text=list(texts), images=list(images), return_tensors="pt", padding=True, truncation=True, do_resize=False)
+    # processed_images = [custom_image_transform(img) for img in images]
+    pixel_values = torch.stack(images)
+
+    # Tokenize text separately
+    text_inputs = CLIPPROCESSOR.tokenizer(list(texts), return_tensors="pt", padding=True, truncation=True)
+
     labels = torch.stack(labels)
-    return inputs['pixel_values'], inputs['input_ids'], inputs['attention_mask'], labels
+    # return inputs['pixel_values'], inputs['input_ids'], inputs['attention_mask'], labels
+    return pixel_values, text_inputs['input_ids'], text_inputs['attention_mask'], labels
 
 def train_model(dataloader_train, dataloader_validation, model, optimizer, num_epochs, threshold=0.5, save_path=None):
     
-    # class_weights = dataloader_train.dataset.calculate_class_weights().to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss()
+    class_weights = dataloader_train.dataset.calculate_class_weights().to(DEVICE)
+    # criterion = nn.BCEWithLogitsLoss()
+    # criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights)
+    
+    # TODO: experiment with different alpha
+    criterion = utils.HierarchicalBCELoss(pos_weight=class_weights, alpha=0.1).to(DEVICE)
 
     train_losses = []
     train_macro_f1_scores = []
@@ -211,9 +215,9 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
 
             loss = criterion(logits, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             optimizer.step()
-
             train_loss += loss.item()
 
             # Collect predictions for metrics
@@ -274,6 +278,23 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
         train_bar.write(f"Train Loss: {avg_train_loss:.4f}, Macro F1: {train_macro_f1_score:.4f}, Micro F1: {train_micro_f1_score:.4f}")
         val_bar.write(f"Val Loss: {avg_val_loss:.4f}, Macro F1: {val_macro_f1_score:.4f}, Micro F1: {val_micro_f1_score:.4f}")
 
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            model_file = os.path.join(save_path, f'epoch_{epoch+1}.pth')
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+                'train_macro_f1': train_macro_f1_score,
+                'train_micro_f1': train_micro_f1_score,
+                'val_macro_f1': val_macro_f1_score,
+                'val_micro_f1': val_micro_f1_score,
+            }
+    
+            torch.save(checkpoint, model_file)
+
     return {
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -285,7 +306,7 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
 
 def main():
     batch_size = 8
-    learning_rate = 1e-4
+    learning_rate = 5e-4
     weight_decay = 1e-6
     threshold = 0.5
     num_epochs = 20
@@ -297,7 +318,6 @@ def main():
         labels="./labels/train.json", 
         transform=TRAIN_TRANSFORMATIONS, 
         use_captions=True, 
-        text_augmenter=utils.TextAugmenter(prob=0.3)
     )
     
     val_dataset = PropagandaDataset(
@@ -316,7 +336,22 @@ def main():
     model = PersuasionTechniquesModel(num_classes).to(DEVICE)
     print(f"Model created with {num_classes} output classes")
 
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate, weight_decay=weight_decay)
+    clip_params = []
+    classifier_params = []
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if 'classifier' in name:
+                classifier_params.append(param)
+            else:
+                clip_params.append(param)
+
+    optimizer = torch.optim.AdamW([
+        {'params': clip_params, 'lr': learning_rate * 0.1},  # Lower LR for CLIP
+        {'params': classifier_params, 'lr': learning_rate}   # Higher LR for classifier
+    ], weight_decay=weight_decay)
+
+    # optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate, weight_decay=weight_decay)
 
     print("Starting training...")
     train_history = train_model(
@@ -326,7 +361,7 @@ def main():
         optimizer,
         num_epochs,
         threshold=threshold,
-        save_path="concept_detection.pth"
+        save_path=f"models/{MODEL}"
     )
     
     utils.plot_training_metrics(train_history)
