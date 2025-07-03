@@ -4,10 +4,7 @@ from sklearn.metrics import f1_score
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import time
 import nltk
-import random
-from nltk.corpus import wordnet
 
 nltk.data.path.append("/home/kachamaka/nltk_data")
 nltk.download('wordnet', download_dir="/home/kachamaka/nltk_data")
@@ -85,19 +82,6 @@ def labels_to_vector(labels):
         idx = PERSUASION_TECHNIQUES.index(label)
         one_hot_vector[idx] = 1.0
     return one_hot_vector
-
-# # one_hot_vector = batch_size x num_classes
-# def vector_to_labels(one_hot_vector):
-#     batch_labels = []
-#     for _, batch in enumerate(one_hot_vector):
-#         labels = []
-#         for idx, value in enumerate(batch):
-#             if value > 0:
-#                 labels.append(PERSUASION_TECHNIQUES[idx])
-#         batch_labels.append(labels)
-
-#     return batch_labels
-
 
 # one_hot_vector = batch_size x num_classes
 def vector_to_labels(one_hot_vector):
@@ -217,7 +201,7 @@ def extract_captions():
         train_caption = processor.decode(output[0], skip_special_tokens=True)
         print(len(train_captions), "/", len(train_df))
         print(f"Generating caption for image: {img_name}")
-        # print(f"Generated caption: {train_caption}")
+
         train_captions.append({
             "id": row['id'],
             "text": train_caption,
@@ -242,7 +226,6 @@ def create_label_to_index_mapping():
     return {label: idx for idx, label in enumerate(sorted(all_labels))}
 
 def create_label_index_mappings():
-    """Return both label_to_index and index_to_label mappings for all nodes."""
     all_labels = set()
     for child, parents in HIERARCHY.items():
         all_labels.add(child)
@@ -258,10 +241,6 @@ def create_label_index_mappings():
 
 
 class HierarchicalBCELoss(nn.Module):
-    """
-    Hierarchical BCE Loss that enforces ancestor consistency.
-    If a child technique is predicted, its ancestors should also be predicted.
-    """
     def __init__(self, pos_weight=None, alpha=0.5):
         super().__init__()
         self.pos_weight = pos_weight
@@ -289,12 +268,7 @@ class HierarchicalBCELoss(nn.Module):
             for label in gold_nodes:
                 target_nodes[mapping[label]] = 1.0
 
-            # print(f"Prediction Nodes: {prediction_nodes}", prediction_nodes.shape)
-            # print(f"Target Nodes: {target_nodes}", target_nodes.shape)
-            # intersection = gold_nodes.intersection(pred_nodes) # orange
-
             hierarchical_loss = F.binary_cross_entropy(prediction_nodes, target_nodes)
-            # hierarchical_loss = F.mse_loss(prediction_nodes, target_nodes)
         
             # Combine losses
             total_loss = self.alpha * flat_loss + (1 - self.alpha) * hierarchical_loss

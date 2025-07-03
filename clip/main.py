@@ -1,23 +1,15 @@
 import utils
 
 import os
-import math
 import torch
-import json
-import matplotlib.pyplot as plt
-from torchvision import transforms, models
+from torchvision import transforms
 import pandas as pd
 from PIL import Image
-from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch import optim
 from torch import nn
 from tqdm import tqdm
-import numpy as np
 from collections import Counter
 from transformers import CLIPProcessor, CLIPModel
-from sklearn.metrics import f1_score
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
 
 # MODEL = "openai/clip-vit-base-patch32"
 MODEL = "openai/clip-vit-base-patch16"
@@ -34,13 +26,13 @@ TRAIN_TRANSFORMATIONS = transforms.Compose([
     transforms.RandomRotation(15),
     transforms.RandomGrayscale(p=0.1),
     transforms.ToTensor(),
-    # transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
+    transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
 ])
 
 VAL_TRANSFORMATIONS = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
-    # transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
+    transforms.Normalize(mean=CLIPPROCESSOR.feature_extractor.image_mean, std=CLIPPROCESSOR.feature_extractor.image_std),
 ])
 
 class PropagandaDataset(Dataset):
@@ -115,7 +107,7 @@ class PropagandaDataset(Dataset):
             print(f"{label:50s}: {count} samples")
    
 class PersuasionTechniquesModel(nn.Module):
-    def __init__(self, num_classes, dropout_rate=0.4):
+    def __init__(self, num_classes, dropout_rate=0.2):
         super(PersuasionTechniquesModel, self).__init__()
 
         self.model = CLIPModel.from_pretrained(MODEL)
@@ -188,7 +180,7 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
     # criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights)
     
     # TODO: experiment with different alpha
-    criterion = utils.HierarchicalBCELoss(pos_weight=class_weights, alpha=0.5).to(DEVICE)
+    criterion = utils.HierarchicalBCELoss(pos_weight=class_weights, alpha=0.6).to(DEVICE)
 
     train_losses = []
     train_macro_f1_scores = []
@@ -316,7 +308,7 @@ def main():
         data_split="train", 
         labels="./labels/train.json", 
         transform=TRAIN_TRANSFORMATIONS, 
-        use_captions=False, 
+        use_captions=True, 
     )
     
     val_dataset = PropagandaDataset(
