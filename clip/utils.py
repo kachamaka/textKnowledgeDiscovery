@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
-from timm.loss.asymmetric_loss import AsymmetricLossMultiLabel
 import torch
 import torch.nn as nn
 from torch.nn import functional as F

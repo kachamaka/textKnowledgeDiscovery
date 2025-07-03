@@ -15,7 +15,6 @@ from torch import nn
 from tqdm import tqdm
 import numpy as np
 from collections import Counter
-import timm
 from transformers import CLIPProcessor, CLIPModel
 from sklearn.metrics import f1_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingWarmRestarts
@@ -189,7 +188,7 @@ def train_model(dataloader_train, dataloader_validation, model, optimizer, num_e
     # criterion = nn.BCEWithLogitsLoss(pos_weight=class_weights)
     
     # TODO: experiment with different alpha
-    criterion = utils.HierarchicalBCELoss(pos_weight=class_weights, alpha=0.1).to(DEVICE)
+    criterion = utils.HierarchicalBCELoss(pos_weight=class_weights, alpha=0.5).to(DEVICE)
 
     train_losses = []
     train_macro_f1_scores = []
@@ -317,7 +316,7 @@ def main():
         data_split="train", 
         labels="./labels/train.json", 
         transform=TRAIN_TRANSFORMATIONS, 
-        use_captions=True, 
+        use_captions=False, 
     )
     
     val_dataset = PropagandaDataset(
